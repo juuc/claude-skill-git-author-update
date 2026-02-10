@@ -57,11 +57,12 @@ Open Claude Code and type:
 ```
 
 Claude will walk you through the entire process:
-1. Ask for your org name, emails, and date range
-2. Verify prerequisites (gh auth, org membership)
-3. Run the batch update in the background
-4. Monitor progress and report results
-5. Verify contribution count via GitHub API
+1. Detect your gh auth and SSH config (reads `~/.ssh/config` to find the right host alias)
+2. Ask for your org name, emails, and date range
+3. Verify prerequisites (org membership, email verification)
+4. Run the batch update in the background (SSH or HTTPS, auto-detected)
+5. Monitor progress and report results
+6. Verify contribution count via GitHub API
 
 ### Via CLI directly
 
@@ -85,6 +86,8 @@ bash ~/.claude/commands/git-author-update.sh \
 | `--new-email` | Yes | New author email (must be verified on GitHub) |
 | `--since` | Yes | Start date (`YYYY-MM-DD`, inclusive) |
 | `--until` | Yes | End date (`YYYY-MM-DD`, exclusive) |
+| `--ssh-host` | No | SSH host alias from `~/.ssh/config` (e.g., `github.com-work`) |
+| `--git-host` | No | GitHub hostname (default: `github.com`, for GHE: `github.mycompany.com`) |
 | `--skip` | No | Comma-separated repo names to skip |
 | `--dry-run` | No | Rewrite locally but don't push |
 

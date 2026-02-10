@@ -14,6 +14,7 @@ set -eo pipefail
 #     --new-email "personal@gmail.com" \
 #     --since "2025-01-01" \
 #     --until "2026-01-01" \
+#     [--ssh-host "github.com-work"] \
 #     [--skip "repo1,repo2"] \
 #     [--dry-run]
 #
@@ -21,6 +22,15 @@ set -eo pipefail
 #   - gh CLI authenticated with push access to the org
 #   - NEW_EMAIL must be verified on the target GitHub account
 #   - Target account should be a member of the org (for private repos)
+#   - If using SSH: SSH key configured for the org account in ~/.ssh/config
+#
+# Remote protocol:
+#   --ssh-host HOST   Use SSH with given host alias (e.g., github.com-work)
+#                     Clones via: git@HOST:ORG/REPO.git
+#   --git-host HOST   GitHub hostname (default: github.com)
+#                     For GitHub Enterprise: github.mycompany.com
+#   (default)         Uses HTTPS via gh CLI credential helper
+#                     Clones via: https://GIT_HOST/ORG/REPO.git
 #
 # Notes:
 #   - macOS and Linux compatible
@@ -36,6 +46,8 @@ NEW_EMAIL=""
 SINCE_DATE=""
 UNTIL_DATE=""
 SKIP_REPOS_CSV=""
+SSH_HOST=""
+GIT_HOST="github.com"
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -47,10 +59,12 @@ while [[ $# -gt 0 ]]; do
     --since)     SINCE_DATE="$2"; shift 2 ;;
     --until)     UNTIL_DATE="$2"; shift 2 ;;
     --skip)      SKIP_REPOS_CSV="$2"; shift 2 ;;
+    --ssh-host)  SSH_HOST="$2"; shift 2 ;;
+    --git-host)  GIT_HOST="$2"; shift 2 ;;
     --dry-run)   DRY_RUN=true; shift ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: bash $0 --org ORG --old-email EMAIL --new-name NAME --new-email EMAIL --since YYYY-MM-DD --until YYYY-MM-DD [--skip repo1,repo2] [--dry-run]" >&2
+      echo "Usage: bash $0 --org ORG --old-email EMAIL --new-name NAME --new-email EMAIL --since YYYY-MM-DD --until YYYY-MM-DD [--ssh-host HOST] [--git-host HOST] [--skip repo1,repo2] [--dry-run]" >&2
       exit 1
       ;;
   esac
@@ -83,6 +97,15 @@ IFS=',' read -ra SKIP_REPOS <<< "$SKIP_REPOS_CSV"
 
 # --- Functions ---
 log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE"; }
+
+repo_url() {
+  local repo="$1"
+  if [[ -n "$SSH_HOST" ]]; then
+    echo "git@${SSH_HOST}:${ORG}/${repo}.git"
+  else
+    echo "https://${GIT_HOST}/${ORG}/${repo}.git"
+  fi
+}
 
 should_skip() {
   local repo="$1"
@@ -128,6 +151,11 @@ log "=== Git Author Batch Update ==="
 log "Org: $ORG"
 log "From: $OLD_EMAIL -> To: $NEW_NAME <$NEW_EMAIL>"
 log "Date range: $SINCE_DATE to $UNTIL_DATE"
+if [[ -n "$SSH_HOST" ]]; then
+  log "Protocol: SSH (host: $SSH_HOST)"
+else
+  log "Protocol: HTTPS"
+fi
 log "Auto-push: $AUTO_PUSH | Dry-run: $DRY_RUN | Cleanup: $CLEANUP"
 [[ ${#SKIP_REPOS[@]} -gt 0 ]] && log "Skip repos: ${SKIP_REPOS[*]}"
 
@@ -153,7 +181,8 @@ for REPO_NAME in $REPOS; do
   log "[$CURRENT/$REPO_COUNT] $REPO_NAME — cloning..."
 
   REPO_DIR="$WORK_DIR/$REPO_NAME"
-  if ! git clone --quiet "https://github.com/$ORG/$REPO_NAME.git" "$REPO_DIR" 2>/dev/null; then
+  CLONE_URL=$(repo_url "$REPO_NAME")
+  if ! git clone --quiet "$CLONE_URL" "$REPO_DIR" 2>/dev/null; then
     log "[$CURRENT/$REPO_COUNT] $REPO_NAME — FAILED (clone)"
     FAILED=$((FAILED + 1))
     FAILED_REPOS+=("$REPO_NAME")

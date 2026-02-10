@@ -13,30 +13,72 @@ Rewrite commit authors across all repositories in a GitHub organization. Changes
 
 When the user invokes this skill, follow these steps:
 
-### Step 1: Detect gh CLI auth context
+### Step 1: Detect auth and SSH context
 
-Before asking anything, run `gh auth status` to detect the current GitHub CLI state. Present the results to the user:
+Before asking anything, run these commands to detect the user's environment:
 
 ```bash
+# 1. Check gh CLI auth state
 gh auth status
+
+# 2. Check git protocol preference
+gh config get git_protocol 2>/dev/null
+
+# 3. Check SSH config for GitHub host aliases
+grep -E "^Host " ~/.ssh/config 2>/dev/null | grep -i git
 ```
 
 Parse the output to identify:
-- Which account(s) are logged in
-- Which account is currently active
-- What token scopes are available
+- Which gh account(s) are logged in
+- Which account is currently active and its token scopes
+- Git protocol preference (`ssh` or `https`)
+- SSH host aliases for GitHub (e.g., `github.com`, `github.com-work`, `github-personal`)
 
-Save the active account name as `WORK_ACCOUNT` for later use (switching back after accepting invitations).
+Save the active account name as `WORK_ACCOUNT` for later use.
 
-Then confirm with the user:
-- Is the **active account** the one with push access to the org? (It should be the org/work account, not the personal one.)
-- If multiple accounts exist, ask which one should be used for pushing.
-- If no account is logged in, guide them through: `gh auth login -h github.com -s repo --web` (this requires manual browser authorization — the only manual step in the entire flow).
-- If the active account lacks required scopes (`repo`), instruct them to re-auth: `gh auth login -h github.com -s repo --web`
+**Determine the remote protocol:**
 
-**Important:** The active `gh` account must have push access to the org repos. This is typically the work/org account, NOT the personal account they want contributions migrated to.
+Read the user's SSH config directly:
+```bash
+cat ~/.ssh/config 2>/dev/null
+```
 
-Also check if the personal account (NEW_NAME, gathered in next step) is already on `gh auth`. If only one account is logged in, note that the personal account will need to be added later for org invitation acceptance.
+Parse the file to find Host entries that connect to `github.com` (look for `HostName github.com`). Each entry maps a Host alias to an SSH key (IdentityFile). For example:
+```
+Host github.com-work
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_work
+
+Host github.com-personal
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_personal
+```
+
+For each GitHub Host entry found, test which one authenticates as the **work account** (the one with push access to the org):
+```bash
+ssh -T git@HOST_ALIAS 2>&1
+# Output: "Hi WORK_ACCOUNT! You've successfully authenticated..."
+```
+
+Auto-select the SSH host alias that authenticates as the work account. Save it as `SSH_HOST` — this will be passed as `--ssh-host` to the script.
+
+**If no SSH config exists** (or no GitHub entries found), ask the user which connection method to use:
+- **HTTPS** (default) — uses `gh` CLI credential helper, no extra setup needed
+- **SSH** — user must provide their SSH host alias or set up `~/.ssh/config` first
+
+Save the final decision as `SSH_HOST` (the alias string, or empty for HTTPS).
+
+**Confirm gh auth:**
+- Is the **active gh account** the one with push access to the org? (It should be the work/org account.)
+- If multiple accounts exist, ask which one should be used.
+- If no account is logged in, guide them: `gh auth login -h GIT_HOST -s repo --web` (manual browser step). Use `github.com` as the default GIT_HOST, or the user's GitHub Enterprise hostname if applicable.
+- If the active account lacks required scopes (`repo`), re-auth: `gh auth login -h GIT_HOST -s repo --web`
+
+**Important:** The active `gh` account must have push access to the org repos. SSH is used for git clone/push operations, while `gh` CLI is still needed for API calls (repo listing, org membership, GraphQL).
+
+Also check if the personal account (NEW_NAME, gathered in next step) is already on `gh auth`. If only one account is logged in, note that the personal account may need to be added later for org invitation acceptance.
 
 ### Step 2: Gather parameters
 
@@ -50,6 +92,7 @@ Now ask the user for the following using AskUserQuestion or by reading their mes
 - **UNTIL_DATE**: End date in `YYYY-MM-DD` format (e.g., `2026-01-01`). Commits ON this date are excluded.
 
 Optional:
+- **GIT_HOST**: GitHub hostname (default: `github.com`). For GitHub Enterprise, e.g., `github.mycompany.com`. Detected from `gh auth status` output.
 - **SKIP_REPOS**: Comma-separated list of repos to skip (default: none)
 - **DRY_RUN**: If true, rewrite but don't push (default: false)
 
@@ -75,7 +118,7 @@ gh api -X POST "orgs/ORG/invitations" -F invitee_id=$USER_ID -f role=member
 
 If inviting fails due to missing `admin:org` scope, re-auth and retry:
 ```bash
-gh auth login -h github.com -s admin:org,repo --web
+gh auth login -h GIT_HOST -s admin:org,repo --web
 # Then retry the invite commands above
 ```
 
@@ -88,7 +131,7 @@ gh auth status 2>&1 | grep -c "NEW_NAME"
 
 If the personal account is NOT on gh CLI, add it (this requires manual browser auth):
 ```bash
-gh auth login -h github.com -s repo,read:org --web
+gh auth login -h GIT_HOST -s repo,read:org --web
 # User completes browser OAuth for their personal account
 ```
 
@@ -118,15 +161,19 @@ gh api "users/NEW_NAME" --jq '{login, email, id}'
 
 Remind the user:
 - NEW_EMAIL must be a **verified email** on the target GitHub account
-- Check at: https://github.com/settings/emails (while logged in as the personal account)
+- Check at: `https://GIT_HOST/settings/emails` (while logged in as the personal account)
 - GitHub only counts contributions for verified emails
 - This cannot be checked via API — the user must confirm it themselves
 
 ### Step 4: Generate and run the script
 
-Run the script with the user's parameters in the background:
+Run the script with the user's parameters in the background. Include `--ssh-host` if SSH was detected/selected in Step 1:
 
 ```bash
+# Build the command with all determined parameters.
+# Include --ssh-host if SSH was detected in Step 1.
+# Include --git-host if not github.com (e.g., GitHub Enterprise).
+# Include --skip and --dry-run if user requested them.
 nohup bash ~/.claude/commands/git-author-update.sh \
   --org "ORG" \
   --old-email "OLD_EMAIL" \
@@ -134,6 +181,8 @@ nohup bash ~/.claude/commands/git-author-update.sh \
   --new-email "NEW_EMAIL" \
   --since "SINCE_DATE" \
   --until "UNTIL_DATE" \
+  --ssh-host "SSH_HOST" \
+  --git-host "GIT_HOST" \
   > /dev/null 2>&1 &
 echo "PID: $!"
 ```
@@ -174,7 +223,7 @@ Report the results to the user. Note: GitHub may take ~30 minutes to fully refle
 The entire flow is automated by Claude Code **except** these steps which require browser-based GitHub OAuth:
 
 1. **`gh auth login`** — When the work account or personal account is not yet on the gh CLI, the user must complete OAuth in their browser. Claude will guide them through it.
-2. **Email verification** — The user must confirm their personal email is verified at github.com/settings/emails. Claude cannot check or do this via API.
+2. **Email verification** — The user must confirm their personal email is verified at `GIT_HOST/settings/emails`. Claude cannot check or do this via API.
 
 Everything else (account switching, org invitation, invitation acceptance, script execution, monitoring, verification) is fully automated.
 
