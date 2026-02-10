@@ -186,13 +186,139 @@ gh api "users/NEW_NAME" --jq '{login, email, id}'
 
 **Do not proceed until the user confirms yes.** This cannot be checked via API.
 
-### Step 4: Final confirmation and run
+### Step 4: Pre-flight checks
 
-**Before executing, show a full summary of all parameters and ask for explicit confirmation. This is an irreversible operation.**
+**Before executing anything irreversible, run a full validation pass. Every check must pass before proceeding.**
+
+#### 4a. Scan all repos — count affected commits
+
+List all repos and count matching commits **without modifying anything**:
+
+```bash
+REPOS=$(gh repo list "ORG" --limit 1000 --json name --jq '.[].name')
+```
+
+For each repo, clone to a temp dir and count commits matching OLD_EMAIL within the date range:
+```bash
+PREFLIGHT_DIR="/tmp/git-author-preflight-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$PREFLIGHT_DIR"
+
+for REPO_NAME in $REPOS; do
+  git clone --quiet "CLONE_URL" "$PREFLIGHT_DIR/$REPO_NAME" 2>/dev/null || continue
+  COUNT=$(cd "$PREFLIGHT_DIR/$REPO_NAME" && git log --all --author="OLD_EMAIL" --since="SINCE_DATE" --until="UNTIL_DATE" --oneline 2>/dev/null | wc -l | tr -d ' ')
+  [ "$COUNT" -gt 0 ] && echo "$REPO_NAME: $COUNT"
+  rm -rf "$PREFLIGHT_DIR/$REPO_NAME"
+done
+```
+
+Use the correct clone URL (SSH or HTTPS, as determined in Step 1).
+
+Present the full scan results to the user:
+
+> **Pre-flight scan complete:**
+>
+> | Repo | Commits to rewrite |
+> |------|--------------------|
+> | repo-a | 42 |
+> | repo-b | 1,035 |
+> | ... | ... |
+>
+> **Total: X repos, Y commits affected out of Z total repos scanned.**
+> Repos with 0 matching commits: (count) — these will be skipped.
+
+**Ask the user:** Does this look correct? Any repos you want to add to the skip list?
+
+If the scan finds **zero commits** across all repos, stop and tell the user — something is wrong (wrong email, wrong date range, or no commits exist).
+
+#### 4b. Test clone and push access
+
+Pick the **smallest repo** from the affected list (fewest commits) to test access:
+
+```bash
+# Test clone
+git clone --quiet "CLONE_URL" "$PREFLIGHT_DIR/test-repo" 2>/dev/null
+
+# Test push access (push without changes — verifies permissions)
+cd "$PREFLIGHT_DIR/test-repo"
+git push --dry-run --force 2>&1
+```
+
+If clone fails → wrong credentials or SSH config. Report and stop.
+If push dry-run fails → no push permission or branch protection. Report and stop.
+
+Clean up:
+```bash
+rm -rf "$PREFLIGHT_DIR"
+```
+
+Report the test result to the user:
+> Clone and push access verified on `test-repo`.
+
+#### 4c. Test rewrite on one repo (dry-run)
+
+Run the script with `--dry-run` on the smallest affected repo to verify the rewrite logic works:
+
+```bash
+bash ~/.claude/commands/git-author-update.sh \
+  --org "ORG" \
+  --old-email "OLD_EMAIL" \
+  --new-name "NEW_NAME" \
+  --new-email "NEW_EMAIL" \
+  --since "SINCE_DATE" \
+  --until "UNTIL_DATE" \
+  --ssh-host "SSH_HOST" \
+  --git-host "GIT_HOST" \
+  --skip "ALL_OTHER_REPOS" \
+  --dry-run
+```
+
+Wait for it to complete (single small repo should be fast). Check the log for success:
+```bash
+tail -5 /tmp/git-author-update-*/batch.log
+```
+
+If the dry-run shows FAILED → investigate the error before proceeding. Common issues:
+- macOS `grep` incompatibility
+- Git filter-branch errors
+- Date parsing issues
+
+Report to the user:
+> Dry-run test on `test-repo`: successfully rewrote X commits locally (not pushed).
+
+Then clean up the dry-run working directory:
+```bash
+rm -rf /tmp/git-author-update-*
+```
+
+#### 4d. Record baseline contribution count
+
+Get the current contribution count before any changes, so we can compare after:
+
+```bash
+gh api graphql -f query='{
+  user(login: "NEW_NAME") {
+    contributionsCollection(from: "SINCE_DATET00:00:00Z", to: "UNTIL_DATET00:00:00Z") {
+      contributionCalendar { totalContributions }
+      restrictedContributionsCount
+      totalCommitContributions
+    }
+  }
+}'
+```
+
+Save and show the baseline:
+> **Current contribution count for `NEW_NAME`:**
+> - Total contributions: X
+> - Restricted (private): Y
+> - Commit contributions: Z
+
+### Step 5: Final confirmation and execute
+
+**All pre-flight checks passed. Show the full summary and ask for explicit confirmation.**
 
 Present to the user:
 
-> **Ready to execute. Please review all parameters:**
+> **All checks passed. Ready to execute.**
 >
 > | Parameter | Value |
 > |-----------|-------|
@@ -203,9 +329,17 @@ Present to the user:
 > | Connection | SSH (`SSH_HOST`) / HTTPS |
 > | GitHub host | `GIT_HOST` |
 > | Skip repos | (list or none) |
-> | Dry run | yes/no |
+> | Repos affected | X repos, Y commits |
+> | Baseline contributions | Z |
 >
-> **This will rewrite git history and force-push to all repos in `ORG`. This is irreversible.**
+> **Pre-flight results:**
+> - Clone access: OK
+> - Push access: OK
+> - Rewrite dry-run: OK
+> - Org membership: OK
+> - Email verified: confirmed by user
+>
+> **This will rewrite git history and force-push to all X repos. This is irreversible.**
 >
 > Proceed?
 
@@ -232,7 +366,7 @@ Find the log file:
 ls -t /tmp/git-author-update-*/batch.log | head -1
 ```
 
-### Step 5: Monitor progress
+### Step 6: Monitor progress
 
 Periodically check the log file (every 30-60 seconds, longer for large repos):
 ```bash
@@ -241,7 +375,7 @@ tail -20 /tmp/git-author-update-*/batch.log
 
 Wait until you see the final `DONE:` summary line.
 
-### Step 6: Verify results
+### Step 7: Verify results
 
 After completion, check contribution count via GitHub GraphQL:
 ```bash
@@ -256,7 +390,18 @@ gh api graphql -f query='{
 }'
 ```
 
-Report the results to the user. Note: GitHub may take ~30 minutes to fully reflect changes on the contribution graph.
+Compare with the baseline from Step 4d and report the difference:
+
+> **Results:**
+> - Repos updated: X (Y commits rewritten)
+> - Failed: (count and names, if any)
+>
+> **Contribution count change for `NEW_NAME`:**
+> - Before: A total (B restricted)
+> - After: C total (D restricted)
+> - Change: +E contributions
+>
+> Note: GitHub may take ~30 minutes to fully reflect all changes on the contribution graph. Check again later if the numbers haven't fully updated.
 
 ## Manual steps (requires user browser interaction)
 
