@@ -21,18 +21,22 @@ Before asking anything, run `gh auth status` to detect the current GitHub CLI st
 gh auth status
 ```
 
-Show the user:
+Parse the output to identify:
 - Which account(s) are logged in
 - Which account is currently active
 - What token scopes are available
 
+Save the active account name as `WORK_ACCOUNT` for later use (switching back after accepting invitations).
+
 Then confirm with the user:
 - Is the **active account** the one with push access to the org? (It should be the org/work account, not the personal one.)
 - If multiple accounts exist, ask which one should be used for pushing.
-- If no account is logged in, instruct them to run `gh auth login`.
+- If no account is logged in, guide them through: `gh auth login -h github.com -s repo --web` (this requires manual browser authorization — the only manual step in the entire flow).
 - If the active account lacks required scopes (`repo`), instruct them to re-auth: `gh auth login -h github.com -s repo --web`
 
 **Important:** The active `gh` account must have push access to the org repos. This is typically the work/org account, NOT the personal account they want contributions migrated to.
+
+Also check if the personal account (NEW_NAME, gathered in next step) is already on `gh auth`. If only one account is logged in, note that the personal account will need to be added later for org invitation acceptance.
 
 ### Step 2: Gather parameters
 
@@ -51,30 +55,72 @@ Optional:
 
 ### Step 3: Verify prerequisites
 
-Check these before running:
+Run all checks below. Handle each failure before proceeding.
+
+#### 3a. Check org membership
 
 ```bash
-# 1. Verify the target account (NEW_NAME) is a member of the org
-#    (required for private repo contributions to appear on the graph)
 gh api "orgs/ORG/members/NEW_NAME" 2>&1
 ```
 
-If the target account is NOT a member of the org, offer to invite them:
+If the target account is already a member → proceed to 3b.
+
+If NOT a member, run the full invite-and-accept flow:
+
+**Invite** (using the work account, which should be active):
 ```bash
-# Get user ID
 USER_ID=$(gh api "users/NEW_NAME" --jq '.id')
-# Invite (requires admin:org scope on the active account)
 gh api -X POST "orgs/ORG/invitations" -F invitee_id=$USER_ID -f role=member
 ```
 
-If inviting fails due to missing `admin:org` scope, instruct the user:
+If inviting fails due to missing `admin:org` scope, re-auth and retry:
 ```bash
 gh auth login -h github.com -s admin:org,repo --web
+# Then retry the invite commands above
 ```
 
-Also remind the user:
-- The NEW_EMAIL must be a **verified email** on the target GitHub account (check at https://github.com/settings/emails)
+**Accept the invitation** (must switch to the personal account):
+
+First check if the personal account is on gh CLI:
+```bash
+gh auth status 2>&1 | grep -c "NEW_NAME"
+```
+
+If the personal account is NOT on gh CLI, add it (this requires manual browser auth):
+```bash
+gh auth login -h github.com -s repo,read:org --web
+# User completes browser OAuth for their personal account
+```
+
+Then switch to the personal account and accept:
+```bash
+gh auth switch -u NEW_NAME
+gh api -X PATCH "user/memberships/orgs/ORG" -f state=active
+```
+
+Verify acceptance succeeded:
+```bash
+gh api "user/memberships/orgs/ORG" --jq '.state'
+# Should output: "active"
+```
+
+Switch back to the work account for the remaining steps:
+```bash
+gh auth switch -u WORK_ACCOUNT
+```
+
+#### 3b. Confirm email verification
+
+Run this to check if the target account exists and is valid:
+```bash
+gh api "users/NEW_NAME" --jq '{login, email, id}'
+```
+
+Remind the user:
+- NEW_EMAIL must be a **verified email** on the target GitHub account
+- Check at: https://github.com/settings/emails (while logged in as the personal account)
 - GitHub only counts contributions for verified emails
+- This cannot be checked via API — the user must confirm it themselves
 
 ### Step 4: Generate and run the script
 
@@ -123,6 +169,15 @@ gh api graphql -f query='{
 
 Report the results to the user. Note: GitHub may take ~30 minutes to fully reflect changes on the contribution graph.
 
+## Manual steps (requires user browser interaction)
+
+The entire flow is automated by Claude Code **except** these steps which require browser-based GitHub OAuth:
+
+1. **`gh auth login`** — When the work account or personal account is not yet on the gh CLI, the user must complete OAuth in their browser. Claude will guide them through it.
+2. **Email verification** — The user must confirm their personal email is verified at github.com/settings/emails. Claude cannot check or do this via API.
+
+Everything else (account switching, org invitation, invitation acceptance, script execution, monitoring, verification) is fully automated.
+
 ## Important notes
 
 - This rewrites git history and force-pushes. **It is irreversible.**
@@ -134,5 +189,6 @@ Report the results to the user. Note: GitHub may take ~30 minutes to fully refle
 - `Co-authored-by` trailers do NOT produce GitHub green squares. You must change the actual `GIT_AUTHOR_EMAIL`.
 - The target email must be a verified email on the GitHub account for contributions to count.
 - The target account must be a member of the org for private repo contributions to appear.
+- `gh api` uses `-f` for string parameters, `-F` for integer parameters (e.g., `invitee_id`).
 
 $ARGUMENTS
