@@ -13,14 +13,35 @@ Rewrite commit authors across all repositories in a GitHub organization. Changes
 
 When the user invokes this skill, follow these steps:
 
-### Step 1: Gather parameters
+### Step 1: Detect gh CLI auth context
 
-Ask the user for the following using AskUserQuestion or by reading their message:
+Before asking anything, run `gh auth status` to detect the current GitHub CLI state. Present the results to the user:
+
+```bash
+gh auth status
+```
+
+Show the user:
+- Which account(s) are logged in
+- Which account is currently active
+- What token scopes are available
+
+Then confirm with the user:
+- Is the **active account** the one with push access to the org? (It should be the org/work account, not the personal one.)
+- If multiple accounts exist, ask which one should be used for pushing.
+- If no account is logged in, instruct them to run `gh auth login`.
+- If the active account lacks required scopes (`repo`), instruct them to re-auth: `gh auth login -h github.com -s repo --web`
+
+**Important:** The active `gh` account must have push access to the org repos. This is typically the work/org account, NOT the personal account they want contributions migrated to.
+
+### Step 2: Gather parameters
+
+Now ask the user for the following using AskUserQuestion or by reading their message. Use the detected auth context to pre-fill or suggest values where possible (e.g., the active account's email as OLD_EMAIL):
 
 - **ORG**: GitHub organization name (e.g., `myorg`)
 - **OLD_EMAIL**: The current commit author email to replace (e.g., `work@company.com`)
-- **NEW_NAME**: The new author name (e.g., `username`)
-- **NEW_EMAIL**: The new author email (e.g., `personal@gmail.com`)
+- **NEW_NAME**: The new author name / GitHub username to migrate contributions to (e.g., `username`)
+- **NEW_EMAIL**: The new author email — must be verified on the target GitHub account (e.g., `personal@gmail.com`)
 - **SINCE_DATE**: Start date in `YYYY-MM-DD` format (e.g., `2025-01-01`)
 - **UNTIL_DATE**: End date in `YYYY-MM-DD` format (e.g., `2026-01-01`). Commits ON this date are excluded.
 
@@ -28,30 +49,34 @@ Optional:
 - **SKIP_REPOS**: Comma-separated list of repos to skip (default: none)
 - **DRY_RUN**: If true, rewrite but don't push (default: false)
 
-### Step 2: Verify prerequisites
+### Step 3: Verify prerequisites
 
 Check these before running:
 
 ```bash
-# 1. gh CLI must be authenticated as an account with push access to the org
-gh auth status
-
-# 2. The NEW_EMAIL must be a verified email on the target GitHub account
-#    (GitHub only counts contributions for verified emails)
-
-# 3. The target account should be a member of the org
+# 1. Verify the target account (NEW_NAME) is a member of the org
 #    (required for private repo contributions to appear on the graph)
+gh api "orgs/ORG/members/NEW_NAME" 2>&1
 ```
 
-If the target account is not a member of the org, offer to invite them:
+If the target account is NOT a member of the org, offer to invite them:
 ```bash
 # Get user ID
 USER_ID=$(gh api "users/NEW_NAME" --jq '.id')
-# Invite (requires admin:org scope)
+# Invite (requires admin:org scope on the active account)
 gh api -X POST "orgs/ORG/invitations" -F invitee_id=$USER_ID -f role=member
 ```
 
-### Step 3: Generate and run the script
+If inviting fails due to missing `admin:org` scope, instruct the user:
+```bash
+gh auth login -h github.com -s admin:org,repo --web
+```
+
+Also remind the user:
+- The NEW_EMAIL must be a **verified email** on the target GitHub account (check at https://github.com/settings/emails)
+- GitHub only counts contributions for verified emails
+
+### Step 4: Generate and run the script
 
 Run the script with the user's parameters in the background:
 
@@ -72,7 +97,7 @@ Find the log file:
 ls -t /tmp/git-author-update-*/batch.log | head -1
 ```
 
-### Step 4: Monitor progress
+### Step 5: Monitor progress
 
 Periodically check the log file (every 30-60 seconds, longer for large repos):
 ```bash
@@ -81,7 +106,7 @@ tail -20 /tmp/git-author-update-*/batch.log
 
 Wait until you see the final `DONE:` summary line.
 
-### Step 5: Verify results
+### Step 6: Verify results
 
 After completion, check contribution count via GitHub GraphQL:
 ```bash
