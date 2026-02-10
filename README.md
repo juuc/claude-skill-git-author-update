@@ -12,8 +12,8 @@ If you commit to an org with a work email, those contributions don't show on you
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
 - [GitHub CLI](https://cli.github.com/) (`gh`) authenticated with push access to the target org
-- The target personal email must be [verified on GitHub](https://github.com/settings/emails)
-- The target account should be a [member of the org](https://docs.github.com/en/organizations/managing-membership-in-your-organization) (required for private repo contributions)
+- The target personal email must be verified on GitHub (Settings > Emails)
+- The target account should be a member of the org (required for private repo contributions)
 
 ## Installation
 
@@ -28,11 +28,8 @@ git clone https://github.com/juuc/claude-skill-git-author-update.git /tmp/claude
 ### Manual install
 
 ```bash
-# Clone the repo
 git clone https://github.com/juuc/claude-skill-git-author-update.git
 cd claude-skill-git-author-update
-
-# Run installer
 bash install.sh
 ```
 
@@ -56,13 +53,49 @@ Open Claude Code and type:
 /user:git-author-update
 ```
 
-Claude will walk you through the entire process:
-1. Detect your gh auth and SSH config (reads `~/.ssh/config` to find the right host alias)
-2. Ask for your org name, emails, and date range
-3. Verify prerequisites (org membership, email verification)
-4. Run the batch update in the background (SSH or HTTPS, auto-detected)
-5. Monitor progress and report results
-6. Verify contribution count via GitHub API
+Claude handles the entire process through 7 steps, confirming with you at every decision point:
+
+#### Step 1: Detect environment
+- Runs `gh auth status` to find logged-in accounts
+- Reads `~/.ssh/config` to detect SSH host aliases
+- Tests SSH connectivity with `ssh -T`
+- **Asks you to confirm:** active account, SSH host alias, GitHub hostname
+
+#### Step 2: Gather parameters
+- **Asks you for:** org name, old email, new username, new email, date range
+- **Asks you for (optional):** repos to skip, dry-run mode
+
+#### Step 3: Verify prerequisites
+- Checks org membership via API
+  - If not a member → **asks you:** "Should I send an invitation?"
+  - If yes → **asks you:** "I need to switch accounts to accept. Proceed?"
+  - Handles the full invite-and-accept flow automatically
+- **Asks you to confirm:** "Is your email verified on GitHub?" (blocks until yes)
+
+#### Step 4: Pre-flight checks (read-only, nothing modified)
+- **4a. Scan all repos** — clones each, counts matching commits, shows full table
+  - **Asks you:** "Does this look correct? Any repos to skip?"
+  - Stops if 0 commits found
+- **4b. Test clone + push** — tests access on the smallest affected repo
+  - Stops if credentials or permissions fail
+- **4c. Dry-run rewrite** — runs the script with `--dry-run` on one repo
+  - Stops if filter-branch fails (catches macOS compat issues, date parsing, etc.)
+- **4d. Record baseline** — gets current contribution count for before/after comparison
+
+#### Step 5: Final confirmation
+- Shows full parameter summary table
+- Shows all pre-flight check results
+- Shows affected repos count + commit count
+- **"This is irreversible. Proceed?"** (blocks until explicit yes)
+
+#### Step 6: Execute + monitor
+- Runs script in background
+- Monitors log file periodically until completion
+
+#### Step 7: Verify results
+- Queries contribution count via GitHub GraphQL API
+- Compares with baseline from Step 4d
+- Reports: repos updated, commits rewritten, contribution count change
 
 ### Via CLI directly
 
@@ -104,6 +137,7 @@ tail -f /tmp/git-author-update-*/batch.log
 [01:06:07] Org: myorg
 [01:06:07] From: work@company.com -> To: username <personal@gmail.com>
 [01:06:07] Date range: 2025-01-01 to 2026-01-01
+[01:06:07] Protocol: SSH (host: github.com-work)
 [01:06:09] Found 65 repositories
 [01:06:09] [1/65] repo-a — cloning...
 [01:06:11] [1/65] repo-a — rewriting 42 commits...
@@ -115,19 +149,29 @@ tail -f /tmp/git-author-update-*/batch.log
 ## How it works
 
 1. Lists all repos in the org via `gh repo list`
-2. Clones each repo, counts commits matching the old email + date range
+2. Clones each repo (via SSH or HTTPS), counts commits matching the old email + date range
 3. Runs `git filter-branch --env-filter` to change `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL`
-4. Also cleans up any existing `Co-authored-by` trailers via `--msg-filter`
+4. Cleans up any existing `Co-authored-by` trailers via `--msg-filter`
 5. Force-pushes all branches and tags
 6. Cleans up cloned repos after successful push
 
+## Manual steps (browser only)
+
+The entire flow is automated by Claude Code **except:**
+
+1. **`gh auth login`** — when a GitHub account is not yet on the CLI, browser OAuth is required
+2. **Email verification** — you must confirm your email is verified at GitHub Settings > Emails
+
+Everything else — account switching, org invitations, invitation acceptance, pre-flight checks, script execution, monitoring, and verification — is fully automated.
+
 ## Important notes
 
-- **Irreversible.** This rewrites git history and force-pushes. Use `--dry-run` first to test.
+- **Irreversible.** This rewrites git history and force-pushes. The skill runs pre-flight checks and a dry-run test before touching anything.
 - **Large repos are slow.** `filter-branch` processes every commit in a repo, not just matching ones. A repo with 10k commits may take 10-20 minutes.
 - **GitHub reindex takes ~30 minutes.** After the push, the contribution graph updates within about 30 minutes.
-- **Branch protection** may block force-push on some repos. These are logged as FAILED.
+- **Branch protection** may block force-push on some repos. These are logged as FAILED and caught in pre-flight.
 - **macOS + Linux compatible.** Uses `grep -oE` (not `-oP`), handles both `date -r` (macOS) and `date -d` (Linux).
+- **GitHub Enterprise supported.** Use `--git-host` for custom hostnames.
 
 ## Uninstall
 
